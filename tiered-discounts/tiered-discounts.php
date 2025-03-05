@@ -2,7 +2,7 @@
 /*
 Plugin Name: Система ступенчатых скидок
 Description: Добавляет автоматические скидки в корзину на основе суммы заказа с настройкой диапазонов и купонов
-Version: 1.3
+Version: 1.5
 Author: Alekseii Achkasov
 Text Domain: bearcoder.ru
 */
@@ -31,61 +31,79 @@ function td_register_settings() {
     register_setting('td_settings_group', 'td_discount_ranges');
     register_setting('td_settings_group', 'td_allowed_coupons');
     register_setting('td_settings_group', 'td_coupon_mode');
-    register_setting('td_settings_group', 'td_is_active'); // Новый параметр: активность плагина
+    register_setting('td_settings_group', 'td_is_active');
 }
 
 // Страница настроек
 function td_settings_page_content() {
     // Сохранение данных
     if (isset($_POST['td_save_settings'])) {
-        check_admin_referer('td_save_settings_nonce');
-
-        $ranges = array();
-        if (!empty($_POST['td_range_min']) && !empty($_POST['td_range_value']) && !empty($_POST['td_range_type'])) {
-            $mins = $_POST['td_range_min'];
-            $values = $_POST['td_range_value'];
-            $types = $_POST['td_range_type'];
-            for ($i = 0; $i < count($mins); $i++) {
-                if (is_numeric($mins[$i]) && is_numeric($values[$i])) {
-                    $ranges[] = array(
-                        'min' => floatval($mins[$i]),
-                        'value' => floatval($values[$i]),
-                        'type' => sanitize_text_field($types[$i]) // percent или fixed
-                    );
+        if (!check_admin_referer('td_save_settings_nonce')) {
+            echo '<div class="error"><p>Ошибка проверки безопасности. Настройки не сохранены.</p></div>';
+        } else {
+            $ranges = array();
+            if (
+                isset($_POST['td_range_min']) &&
+                isset($_POST['td_range_value']) &&
+                isset($_POST['td_range_type']) &&
+                is_array($_POST['td_range_min']) &&
+                count($_POST['td_range_min']) === count($_POST['td_range_value']) &&
+                count($_POST['td_range_value']) === count($_POST['td_range_type'])
+            ) {
+                $mins = $_POST['td_range_min'];
+                $values = $_POST['td_range_value'];
+                $types = $_POST['td_range_type'];
+                for ($i = 0; $i < count($mins); $i++) {
+                    if (is_numeric($mins[$i]) && is_numeric($values[$i])) {
+                        $ranges[] = array(
+                            'min' => floatval($mins[$i]),
+                            'value' => floatval($values[$i]),
+                            'type' => in_array($types[$i], ['percent', 'fixed']) ? $types[$i] : 'percent'
+                        );
+                    }
                 }
             }
+            update_option('td_discount_ranges', $ranges);
+
+            $coupons = isset($_POST['td_coupon']) && is_array($_POST['td_coupon'])
+                ? array_filter(array_map('trim', $_POST['td_coupon']))
+                : array();
+            update_option('td_allowed_coupons', $coupons);
+
+            $coupon_mode = isset($_POST['td_coupon_mode'])
+                ? sanitize_text_field($_POST['td_coupon_mode'])
+                : 'exclude';
+            update_option('td_coupon_mode', $coupon_mode);
+
+            echo '<div class="updated"><p>Настройки успешно сохранены!</p></div>';
         }
-        update_option('td_discount_ranges', $ranges);
-
-        $coupons = array_filter(array_map('trim', $_POST['td_coupon']));
-        update_option('td_allowed_coupons', $coupons);
-
-        $coupon_mode = sanitize_text_field($_POST['td_coupon_mode']);
-        update_option('td_coupon_mode', $coupon_mode);
-
-        echo '<div class="updated"><p>Настройки сохранены!</p></div>';
     }
 
     // Обработка активации/деактивации
     if (isset($_POST['td_activate'])) {
-        check_admin_referer('td_activate_nonce');
-        update_option('td_is_active', 'yes');
-        echo '<div class="updated"><p>Функционал активирован!</p></div>';
+        if (check_admin_referer('td_activate_nonce')) {
+            update_option('td_is_active', 'yes');
+            echo '<div class="updated"><p>Функционал активирован!</p></div>';
+        }
     } elseif (isset($_POST['td_deactivate'])) {
-        check_admin_referer('td_deactivate_nonce');
-        update_option('td_is_active', 'no');
-        echo '<div class="updated"><p>Функционал деактивирован!</p></div>';
+        if (check_admin_referer('td_deactivate_nonce')) {
+            update_option('td_is_active', 'no');
+            echo '<div class="updated"><p>Функционал деактивирован!</p></div>';
+        }
     }
 
     // Получаем текущие значения
-    $ranges = get_option('td_discount_ranges', array(
-        array('min' => 0, 'value' => 7, 'type' => 'percent'),
-        array('min' => 10000, 'value' => 10, 'type' => 'percent'),
-        array('min' => 15000, 'value' => 15, 'type' => 'percent')
-    ));
-    $coupons = get_option('td_allowed_coupons', array('HOTELKA', 'LIEM', 'polina'));
+    $ranges = get_option('td_discount_ranges', array());
+    $coupons = get_option('td_allowed_coupons', array());
     $coupon_mode = get_option('td_coupon_mode', 'exclude');
-    $is_active = get_option('td_is_active', 'yes'); // По умолчанию активно
+    $is_active = get_option('td_is_active', 'yes');
+
+    if (empty($coupons)) {
+        $coupons = array('');
+    }
+    if (empty($ranges)) {
+        $ranges = array(array('min' => 0, 'value' => 0, 'type' => 'percent'));
+    }
     ?>
     <div class="wrap">
         <h1>Настройки ступенчатых скидок</h1>
@@ -209,29 +227,22 @@ function td_settings_page_content() {
     <?php
 }
 
-// Логика расчета скидки
+// Логика расчета скидки с округлением
 add_action('woocommerce_cart_calculate_fees', 'td_apply_tiered_discount', 20, 1);
 function td_apply_tiered_discount($cart) {
     if (is_admin() && !defined('DOING_AJAX')) {
         return;
     }
 
-    // Проверяем, активен ли функционал
     $is_active = get_option('td_is_active', 'yes');
     if ($is_active !== 'yes') {
         return;
     }
 
-    // Получаем настройки
-    $ranges = get_option('td_discount_ranges', array(
-        array('min' => 0, 'value' => 7, 'type' => 'percent'),
-        array('min' => 10000, 'value' => 10, 'type' => 'percent'),
-        array('min' => 15000, 'value' => 15, 'type' => 'percent')
-    ));
-    $allowed_coupons = get_option('td_allowed_coupons', array('HOTELKA', 'LIEM', 'polina'));
+    $ranges = get_option('td_discount_ranges', array());
+    $allowed_coupons = get_option('td_allowed_coupons', array());
     $coupon_mode = get_option('td_coupon_mode', 'exclude');
 
-    // Проверяем примененные купоны
     $applied_coupons = $cart->get_applied_coupons();
     $has_coupons = !empty($applied_coupons);
     $coupon_match = false;
@@ -255,15 +266,12 @@ function td_apply_tiered_discount($cart) {
         }
     }
 
-    // Получаем сумму корзины
     $cart_total = $cart->get_subtotal();
 
-    // Сортируем диапазоны
     usort($ranges, function($a, $b) {
         return $a['min'] - $b['min'];
     });
 
-    // Определяем скидку
     $discount_amount = 0;
     $discount_type = '';
     $discount_value = 0;
@@ -281,8 +289,9 @@ function td_apply_tiered_discount($cart) {
         }
     }
 
-    // Применяем скидку
+    // Округляем сумму скидки до целого числа
     if ($discount_amount > 0) {
+        $discount_amount = round($discount_amount); // Округление до целого числа
         $discount_text = $discount_type === 'percent'
             ? sprintf('Скидка %g%% (%s)', $discount_value, wc_price(-$discount_amount))
             : sprintf('Скидка (%s)', wc_price(-$discount_amount));
